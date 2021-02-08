@@ -1,0 +1,153 @@
+import numpy as np
+import tensorflow as tf
+import cv2
+from PIL import ImageDraw
+from PIL import Image as PIL_Image
+
+from styx_msgs.msg import TrafficLight
+
+NN_GRAPH_PREFIX = './light_classification/'
+DEBUG = False
+MODEL_TO_SIM = {
+    '1': TrafficLight.GREEN,
+    '2': TrafficLight.RED,
+    '3': TrafficLight.YELLOW,
+}
+
+MODEL_TO_SITE = {
+    '0': TrafficLight.GREEN,
+    '2': TrafficLight.RED,
+    '1': TrafficLight.YELLOW,
+}
+
+class TLClassifier(object):
+    def __init__(self, is_site):
+        self.is_site = is_site
+        # self.graph = self.load_graph(NN_GRAPH_PREFIX + 'ssd_inception_v2_10000steps/frozen_inference_graph.pb')
+        if is_site:
+            graph_path = 'site/ssd_mobilenet_v1_coco_20000steps/frozen_inference_graph.pb'
+        else:
+            graph_path =  'sim/ssd_mobilenet_v1_coco_20000steps/frozen_inference_graph.pb'
+        self.graph = self.load_graph(NN_GRAPH_PREFIX + graph_path)
+        self.image_tensor = self.graph.get_tensor_by_name('image_tensor:0')
+        self.detection_boxes = self.graph.get_tensor_by_name('detection_boxes:0')
+        self.detection_scores = self.graph.get_tensor_by_name('detection_scores:0')
+        self.detection_classes = self.graph.get_tensor_by_name('detection_classes:0')
+        self.sess = tf.Session(graph=self.graph)
+
+    def load_graph(self, graph_file):
+        """Loads a frozen inference graph"""
+        graph = tf.Graph()
+        with graph.as_default():
+            od_graph_def = tf.GraphDef()
+            with tf.gfile.GFile(graph_file, 'rb') as fid:
+                serialized_graph = fid.read()
+                od_graph_def.ParseFromString(serialized_graph)
+                tf.import_graph_def(od_graph_def, name='')
+        return graph
+
+    def filter_boxes(self, min_score, boxes, scores, classes):
+        """Return boxes with a confidence >= `min_score`"""
+        n = len(classes)
+        idxs = []
+        for i in range(n):
+            if scores[i] >= min_score:
+                idxs.append(i)
+
+        filtered_boxes = boxes[idxs, ...]
+        filtered_scores = scores[idxs, ...]
+        filtered_classes = classes[idxs, ...]
+        return filtered_boxes, filtered_scores, filtered_classes
+
+    def draw_boxes(self, image, boxes, classes, colors, thickness=3):
+        """Draw bounding boxes on the image"""
+        draw = ImageDraw.Draw(image)
+        for i in range(len(boxes)):
+            bot, left, top, right = boxes[i, ...]
+            class_id = int(classes[i])
+            color = colors[class_id - 1]
+            draw.line([(left, top), (left, bot), (right, bot), (right, top), (left, top)], width=thickness, fill=color)
+
+    def to_image_coords(self, boxes, height, width):
+        """
+        The original box coordinate output is normalized, i.e [0, 1].
+
+        This converts it back to the original coordinate based on the image
+        size.
+        """
+        box_coords = np.zeros_like(boxes)
+        box_coords[:, 0] = boxes[:, 0] * height
+        box_coords[:, 1] = boxes[:, 1] * width
+        box_coords[:, 2] = boxes[:, 2] * height
+        box_coords[:, 3] = boxes[:, 3] * width
+
+        return box_coords
+
+    def get_classification(self, image):
+        """Determines the color of the traffic light in the image
+
+        Args:
+            image (cv::Mat): image containing the traffic light
+
+        Returns:
+            int: ID of traffic light color (specified in styx_msgs/TrafficLight)
+
+        """
+        sess = self.sess
+
+        # height, width, shape = image.shape
+        # rescale image
+        # image = cv2.resize(image, (int(width / 2), int(height / 2)))
+        # crop image
+        # image = image[int(0.2 * height):int(0.6 * height), int(width * 0.3):int(width * 0.6)]
+        # convert to RGB for detection
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # image = preprocess(image)
+        image_np = np.expand_dims(np.asarray(image, dtype=np.uint8), 0)
+        # Actual detection.
+        (boxes, scores, classes) = sess.run(
+            [
+                self.detection_boxes,
+                self.detection_scores,
+                self.detection_classes
+            ],
+            feed_dict={self.image_tensor: image_np}
+        )
+
+        # Remove unnecessary dimensions
+        boxes = np.squeeze(boxes)
+        scores = np.squeeze(scores)
+        classes = np.squeeze(classes)
+
+        confidence_cutoff = 0.5
+        # Filter boxes with a confidence score less than `confidence_cutoff`
+        # The current box coordinates are normalized to a range between 0 and 1.
+        # This converts the coordinates actual location on the image.
+        if DEBUG is False:
+            annotated_image = image
+        else:
+            height, width, channels = image.shape
+            boxes, scores, classes = self.filter_boxes(confidence_cutoff, boxes, scores, classes)
+            adjusted_boxes = self.to_image_coords(boxes, height, width)
+            print(classes)
+            print(scores)
+
+            pil_image = PIL_Image.fromarray(image)
+            self.draw_boxes(pil_image, adjusted_boxes, classes, ['green', 'red', 'yellow', 'gray'])
+            annotated_image = np.asarray(pil_image)
+
+        light_status = TrafficLight.UNKNOWN
+        if len(scores) == 0 or scores[0] < confidence_cutoff:
+            return light_status, annotated_image
+
+        likely_color = int(classes[0])
+
+        lookup_dict = MODEL_TO_SITE if self.is_site else MODEL_TO_SIM
+        if str(likely_color) in lookup_dict:
+            light_status = lookup_dict[str(likely_color)]
+
+        if DEBUG:
+            print('likely_color [' + str(likely_color) + ']')
+            print('light status is ' + str(light_status))
+        return light_status, annotated_image
