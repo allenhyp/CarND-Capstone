@@ -6,28 +6,29 @@ from PIL import Image as PIL_Image
 
 from styx_msgs.msg import TrafficLight
 
-NN_GRAPH_PREFIX = './light_classification/'
 DEBUG = False
+
+NN_GRAPH_PREFIX = './light_classification/'
+
 MODEL_TO_SIM = {
-    '1': TrafficLight.GREEN,
-    '2': TrafficLight.RED,
-    '3': TrafficLight.YELLOW,
+    '1': {'ros_label': TrafficLight.GREEN, 'bbox_color': 'green'},
+    '2': {'ros_label': TrafficLight.RED, 'bbox_color': 'red'},
+    '3': {'ros_label': TrafficLight.YELLOW, 'bbox_color': 'yellow'},
 }
 
 MODEL_TO_SITE = {
-    '0': TrafficLight.GREEN,
-    '2': TrafficLight.RED,
-    '1': TrafficLight.YELLOW,
+    '1': {'ros_label': TrafficLight.GREEN, 'bbox_color': 'green'},
+    '2': {'ros_label': TrafficLight.RED, 'bbox_color': 'red'},
+    '3': {'ros_label': TrafficLight.YELLOW, 'bbox_color': 'yellow'},
 }
 
 class TLClassifier(object):
     def __init__(self, is_site):
         self.is_site = is_site
-        # self.graph = self.load_graph(NN_GRAPH_PREFIX + 'ssd_inception_v2_10000steps/frozen_inference_graph.pb')
         if is_site:
-            graph_path = 'site/ssd_mobilenet_v1_coco_20000steps/frozen_inference_graph.pb'
+            graph_path = 'site/ssd_mobilenet_v1_coco_20000_gamma/frozen_inference_graph.pb'
         else:
-            graph_path =  'sim/ssd_mobilenet_v1_coco_20000steps/frozen_inference_graph.pb'
+            graph_path = 'sim/ssd_mobilenet_v1_coco_20000steps/frozen_inference_graph.pb'
         self.graph = self.load_graph(NN_GRAPH_PREFIX + graph_path)
         self.image_tensor = self.graph.get_tensor_by_name('image_tensor:0')
         self.detection_boxes = self.graph.get_tensor_by_name('detection_boxes:0')
@@ -59,13 +60,13 @@ class TLClassifier(object):
         filtered_classes = classes[idxs, ...]
         return filtered_boxes, filtered_scores, filtered_classes
 
-    def draw_boxes(self, image, boxes, classes, colors, thickness=3):
+    def draw_boxes(self, image, boxes, classes, lookup_dict, thickness=3):
         """Draw bounding boxes on the image"""
         draw = ImageDraw.Draw(image)
         for i in range(len(boxes)):
             bot, left, top, right = boxes[i, ...]
             class_id = int(classes[i])
-            color = colors[class_id - 1]
+            color = lookup_dict[str(class_id)]['bbox_color']
             draw.line([(left, top), (left, bot), (right, bot), (right, top), (left, top)], width=thickness, fill=color)
 
     def to_image_coords(self, boxes, height, width):
@@ -82,6 +83,25 @@ class TLClassifier(object):
         box_coords[:, 3] = boxes[:, 3] * width
 
         return box_coords
+
+    def adjust_gamma(self, img, gamma=1.0):
+        inv_gamma = 1.0 / gamma
+        table = np.array([
+          ((i / 255.0) ** inv_gamma) * 255
+          for i in np.arange(0, 256)])
+        return cv2.LUT(img.astype(np.uint8), table.astype(np.uint8))
+
+    def adjust_contrast(self, img):
+        clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(2,2))
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+        img[:,:,0] = clahe.apply(img[:,:,0])
+        img = cv2.cvtColor(img, cv2.COLOR_LAB2RGB)
+        return img
+
+    def preprocess(self, img, gamma=0.4):
+        img = self.adjust_contrast(img)
+        img = self.adjust_gamma(img, gamma)
+        return img
 
     def get_classification(self, image):
         """Determines the color of the traffic light in the image
@@ -103,8 +123,8 @@ class TLClassifier(object):
         # convert to RGB for detection
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        # image = preprocess(image)
-        image_np = np.expand_dims(np.asarray(image, dtype=np.uint8), 0)
+        image = self.preprocess(image, 0.4)
+        image_np = np.expand_dims(image, 0)
         # Actual detection.
         (boxes, scores, classes) = sess.run(
             [
@@ -122,19 +142,20 @@ class TLClassifier(object):
 
         confidence_cutoff = 0.5
         # Filter boxes with a confidence score less than `confidence_cutoff`
-        # The current box coordinates are normalized to a range between 0 and 1.
-        # This converts the coordinates actual location on the image.
+        lookup_dict = MODEL_TO_SITE if self.is_site else MODEL_TO_SIM
         if DEBUG is False:
             annotated_image = image
         else:
             height, width, channels = image.shape
             boxes, scores, classes = self.filter_boxes(confidence_cutoff, boxes, scores, classes)
+            # The current box coordinates are normalized to a range between 0 and 1.
+            # This converts the coordinates actual location on the image.
             adjusted_boxes = self.to_image_coords(boxes, height, width)
             print(classes)
             print(scores)
 
             pil_image = PIL_Image.fromarray(image)
-            self.draw_boxes(pil_image, adjusted_boxes, classes, ['green', 'red', 'yellow', 'gray'])
+            self.draw_boxes(pil_image, adjusted_boxes, classes, lookup_dict)
             annotated_image = np.asarray(pil_image)
 
         light_status = TrafficLight.UNKNOWN
@@ -143,9 +164,8 @@ class TLClassifier(object):
 
         likely_color = int(classes[0])
 
-        lookup_dict = MODEL_TO_SITE if self.is_site else MODEL_TO_SIM
         if str(likely_color) in lookup_dict:
-            light_status = lookup_dict[str(likely_color)]
+            light_status = lookup_dict[str(likely_color)]['ros_label']
 
         if DEBUG:
             print('likely_color [' + str(likely_color) + ']')

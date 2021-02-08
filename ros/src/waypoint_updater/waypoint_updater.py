@@ -19,11 +19,10 @@ Once you have created dbw_node, you will update this node to use the status of t
 Please note that our simulator also provides the exact location of traffic lights and their
 current status in `/vehicle/traffic_lights` message. You can use this message to build this node
 as well as to verify your TL classifier.
-
-TODO (for Yousuf and Aaron): Stopline location for each traffic light.
 '''
 
-LOOKAHEAD_WPS = 10  # Number of waypoints we will publish. You can change this number
+ # Number of waypoints we will publish
+LOOKAHEAD_WPS = 50
 MAX_DECEL = 0.1
 
 class WaypointUpdater(object):
@@ -34,7 +33,7 @@ class WaypointUpdater(object):
         rospy.Subscriber('/base_waypoints', Lane, self.waypoints_cb)
         rospy.Subscriber('/traffic_waypoint', Int32, self.traffic_cb)
 
-        # TODO: Add a subscriber for /traffic_waypoint and /obstacle_waypoint below
+        # unused/unneeded
         # rospy.Subscriber('/obstacle_waypoint', Waypoint, self.obstacle_cb)
 
         self.final_waypoints_pub = rospy.Publisher('final_waypoints', Lane, queue_size=1)
@@ -51,7 +50,7 @@ class WaypointUpdater(object):
     def loop(self):
         rate = rospy.Rate(50)
         while not rospy.is_shutdown():
-            if self.pose and self.base_lane:
+            if self.pose and self.base_lane and self.waypoints_2d and self.waypoints_tree:
                 self.publish_waypoints()
             rate.sleep()
 
@@ -102,7 +101,7 @@ class WaypointUpdater(object):
         for i, wp in enumerate(waypoints):
             p = Waypoint()
             p.pose = wp.pose
-            # - 2 to make sure the car stops in front of the stopline instead of on top of it
+            # offset to make sure the car stops in front of the stopline instead of on top of it
             stop_idx = max(self.stopline_wp_idx - closest_idx - 2, 0)
             dist = self.distance(waypoints, i, stop_idx)
             vel = math.sqrt(2 * MAX_DECEL * dist)
@@ -118,7 +117,6 @@ class WaypointUpdater(object):
     def waypoints_cb(self, waypoints):
         self.base_lane = waypoints
         if not self.waypoints_2d:
-            # print(waypoints)
             self.waypoints_2d = [[waypoint.pose.pose.position.x, waypoint.pose.pose.position.y] for waypoint in
                                  waypoints.waypoints]
             self.waypoints_tree = KDTree(self.waypoints_2d)
@@ -127,7 +125,7 @@ class WaypointUpdater(object):
         self.stopline_wp_idx = msg.data
 
     def obstacle_cb(self, msg):
-        # TODO: Callback for /obstacle_waypoint message. We will implement it later
+        # unused at this time
         pass
 
     def get_waypoint_velocity(self, waypoint):
